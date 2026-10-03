@@ -9,16 +9,16 @@ import (
 	"time"
 )
 
-// NodeState defines the operating state of the local node
+// NodeState defines the discrete operational states of the node
 type NodeState int
 
 const (
-	StateIDLE    NodeState = iota // Idle, listening for invites or commands
-	StateWAITING                  // Invite sent, awaiting peer response
-	StateBUSY                     // Connected in a 1-to-1 private chat session
+	StateIDLE    NodeState = iota // Idle state, awaiting commands or inbound invites
+	StateWAITING                  // Waiting for peer response after sending SYN_INVITE
+	StateBUSY                     // Active 1-on-1 TCP chat session
 )
 
-// NodeManager manages state transitions and TCP connections
+// NodeManager handles state transitions, connection management, and invitation channels
 type NodeManager struct {
 	mu                sync.Mutex
 	State             NodeState
@@ -28,7 +28,7 @@ type NodeManager struct {
 	PendingHostname   string
 }
 
-// NewNodeManager initializes a NodeManager instance
+// NewNodeManager creates a initialized NodeManager instance
 func NewNodeManager(hostname string) *NodeManager {
 	return &NodeManager{
 		State:      StateIDLE,
@@ -36,7 +36,7 @@ func NewNodeManager(hostname string) *NodeManager {
 	}
 }
 
-// StartTCPServer listens for inbound TCP handshake connections
+// StartTCPServer listens for incoming TCP handshake connections
 func (m *NodeManager) StartTCPServer(tcpPort int) {
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", tcpPort))
 	if err != nil {
@@ -54,7 +54,7 @@ func (m *NodeManager) StartTCPServer(tcpPort int) {
 	}
 }
 
-// handleIncomingTCP handles inbound connection requests (SYN phase)
+// handleIncomingTCP processes inbound SYN_INVITE messages
 func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	message, err := reader.ReadString('\n')
@@ -72,7 +72,7 @@ func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 		senderHostname := parts[1]
 
 		m.mu.Lock()
-		// Automatically reject if node is busy or has another pending invite
+		// Automatically reject if the current node is busy or already processing an invite
 		if m.State != StateIDLE || m.PendingInviteChan != nil {
 			m.mu.Unlock()
 			fmt.Fprintf(conn, "SYN_REJECT|BUSY\n")
@@ -87,7 +87,7 @@ func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 
 		fmt.Printf("\n[CHAT REQUEST] Ghost '%s' wants to start a private chat with you!\nType 'y' (or /accept) or 'n' (or /decline)\n> ", senderHostname)
 
-		// Wait for user input via channel or timeout after 30 seconds
+		// Wait asynchronously for user decision or timeout after 30 seconds
 		select {
 		case accepted := <-replyChan:
 			if accepted {
@@ -117,7 +117,7 @@ func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 	}
 }
 
-// AcceptPendingInvite sends approval/rejection signal to the pending invite handler
+// AcceptPendingInvite pushes user decision into the pending invite channel
 func (m *NodeManager) AcceptPendingInvite(accept bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -128,7 +128,7 @@ func (m *NodeManager) AcceptPendingInvite(accept bool) {
 	}
 }
 
-// clearPending resets invitation state variables
+// clearPending resets pending invitation variables
 func (m *NodeManager) clearPending() {
 	m.mu.Lock()
 	m.PendingInviteChan = nil
@@ -136,7 +136,7 @@ func (m *NodeManager) clearPending() {
 	m.mu.Unlock()
 }
 
-// ConnectToPeer initiates an outbound TCP handshake to a remote peer
+// ConnectToPeer initiates an outbound TCP connection and performs the handshake
 func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 	m.mu.Lock()
 	if m.State != StateIDLE {
@@ -189,7 +189,7 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 	}
 }
 
-// resetState sets node state back to IDLE
+// resetState restores node state to StateIDLE
 func (m *NodeManager) resetState() {
 	m.mu.Lock()
 	m.State = StateIDLE
@@ -198,7 +198,7 @@ func (m *NodeManager) resetState() {
 	m.mu.Unlock()
 }
 
-// handleChatSession blocks while reading incoming TCP chat messages
+// handleChatSession blocks until the peer closes the TCP socket
 func (m *NodeManager) handleChatSession(conn net.Conn, peerHostname string) {
 	done := make(chan struct{})
 

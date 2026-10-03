@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// getFreeTCPPort finds an available TCP port dynamically to prevent port conflicts
+// getFreeTCPPort scans for an available local TCP port to support multi-instance testing on one machine
 func getFreeTCPPort(startPort int) int {
 	for port := startPort; port < startPort+100; port++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
@@ -41,12 +41,12 @@ func main() {
 	}
 
 	const discoveryPort = 8888
-	tcpPort := getFreeTCPPort(8889) // Auto-detect available TCP port
+	tcpPort := getFreeTCPPort(8889) // Dynamically assign an open TCP port
 
 	fmt.Printf("\n=== GHOST-2-GHOST CHAT ===\n")
 	fmt.Printf("My Hostname : %s\n", hostname)
 	fmt.Printf("My TCP Port  : %d\n", tcpPort)
-	fmt.Println("Commands    : '/peers', '/connect ', 'y', 'n'")
+	fmt.Println("Commands    : '/peers', '/connect ', 'y', 'n', '/quit'")
 	fmt.Println("-------------------------------------------------------------")
 
 	registry := NewPeerRegistry()
@@ -57,7 +57,7 @@ func main() {
 
 	go ListenBroadcast(discoveryPort, hostname, registry)
 
-	// Periodically send UDP presence broadcasts
+	// Periodically broadcast presence on the LAN
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -68,7 +68,7 @@ func main() {
 		}
 	}()
 
-	// Single centralized CLI input reader loop
+	// Centralized keyboard input processing loop
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		if nodeMgr.State == StateIDLE {
@@ -83,7 +83,7 @@ func main() {
 			continue
 		}
 
-		// Route active chat room messages directly to the TCP connection
+		// When in an active chat session, forward messages to the remote peer
 		if nodeMgr.State == StateBUSY {
 			if line == "/quit" {
 				if nodeMgr.ActiveConn != nil {
@@ -119,7 +119,8 @@ func main() {
 				fmt.Printf("Peer '%s' not found in active list. Use /peers to check.\n", target)
 				continue
 			}
-			nodeMgr.ConnectToPeer(peer.IP, peer.TCPPort)
+			// CRITICAL FIX: Run ConnectToPeer as a Goroutine so it does NOT block the main CLI input loop!
+			go nodeMgr.ConnectToPeer(peer.IP, peer.TCPPort)
 
 		case "/accept", "y", "Y":
 			nodeMgr.AcceptPendingInvite(true)
@@ -127,8 +128,12 @@ func main() {
 		case "/decline", "n", "N":
 			nodeMgr.AcceptPendingInvite(false)
 
+		case "/quit", "/exit":
+			fmt.Println("Exiting Ghost Chat. Goodbye!")
+			os.Exit(0)
+
 		default:
-			fmt.Println("Unknown command. Commands: '/peers', '/connect ', 'y', 'n'")
+			fmt.Println("Unknown command. Commands: '/peers', '/connect ', 'y', 'n', '/quit'")
 		}
 	}
 }

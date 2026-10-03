@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Peer represents an active node in the LAN network
+// Peer represents an active peer node in memory
 type Peer struct {
 	Hostname string
 	IP       string
@@ -14,20 +14,20 @@ type Peer struct {
 	LastSeen time.Time
 }
 
-// PeerRegistry manages active peers in memory with thread-safety
+// PeerRegistry provides a thread-safe in-memory table of active LAN peers
 type PeerRegistry struct {
 	mu    sync.RWMutex
 	peers map[string]Peer
 }
 
-// NewPeerRegistry initializes a new PeerRegistry instance
+// NewPeerRegistry instantiates a new PeerRegistry
 func NewPeerRegistry() *PeerRegistry {
 	return &PeerRegistry{
 		peers: make(map[string]Peer),
 	}
 }
 
-// AddOrUpdate inserts or updates a peer in the registry and returns true if it's new
+// AddOrUpdate inserts or updates peer metadata and returns true if it is a new discovery
 func (r *PeerRegistry) AddOrUpdate(hostname string, ip string, tcpPort int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -45,7 +45,7 @@ func (r *PeerRegistry) AddOrUpdate(hostname string, ip string, tcpPort int) bool
 	return !exists
 }
 
-// GetPeers returns a slice of all currently active peers
+// GetPeers retrieves a copy slice of all currently active peers
 func (r *PeerRegistry) GetPeers() []Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -57,7 +57,7 @@ func (r *PeerRegistry) GetPeers() []Peer {
 	return list
 }
 
-// FindPeer searches for a peer matching either a hostname or an IP address
+// FindPeer searches for a peer entry matching either a hostname or an IP address
 func (r *PeerRegistry) FindPeer(target string) (Peer, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -70,7 +70,7 @@ func (r *PeerRegistry) FindPeer(target string) (Peer, bool) {
 	return Peer{}, false
 }
 
-// StartCleanupRoutine periodically purges inactive peers from memory
+// StartCleanupRoutine periodically removes stale peers that stopped sending broadcasts
 func (r *PeerRegistry) StartCleanupRoutine(timeout time.Duration, checkInterval time.Duration) {
 	ticker := time.NewTicker(checkInterval)
 	go func() {

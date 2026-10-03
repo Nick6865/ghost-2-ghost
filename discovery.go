@@ -9,14 +9,13 @@ import (
 	"syscall"
 )
 
-// encodeMessage formats UDP port, TCP port, and hostname into a standard payload string
-// Format: "UDP_PORT|TCP_PORT|HOSTNAME"
+// encodeMessage builds the payload string: "UDP_PORT|TCP_PORT|HOSTNAME"
 func encodeMessage(udpPort int, tcpPort int, hostname string) []byte {
 	text := fmt.Sprintf("%d|%d|%s", udpPort, tcpPort, hostname)
 	return []byte(text)
 }
 
-// decodeMessage parses raw byte payload into UDP port, TCP port, and hostname string
+// decodeMessage extracts ports and hostname from a payload string
 func decodeMessage(data []byte) (int, int, string, error) {
 	parts := strings.Split(string(data), "|")
 	if len(parts) < 3 {
@@ -30,7 +29,7 @@ func decodeMessage(data []byte) (int, int, string, error) {
 	return udpPort, tcpPort, parts[2], nil
 }
 
-// getBroadcastAddr calculates the broadcast IPv4 address of the active LAN interface
+// getBroadcastAddr determines the subnet broadcast IPv4 address
 func getBroadcastAddr(port int) *net.UDPAddr {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -38,7 +37,6 @@ func getBroadcastAddr(port int) *net.UDPAddr {
 	}
 
 	for _, iface := range interfaces {
-		// Ignore inactive or loopback network interfaces
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
@@ -63,7 +61,7 @@ func getBroadcastAddr(port int) *net.UDPAddr {
 	return &net.UDPAddr{IP: net.IPv4bcast, Port: port}
 }
 
-// Broadcast transmits a presence packet across the LAN via UDP broadcast
+// Broadcast sends a single UDP broadcast packet announcing presence on the LAN
 func Broadcast(udpPort int, tcpPort int, hostname string) {
 	addr := getBroadcastAddr(udpPort)
 	udpConn, err := net.DialUDP("udp", nil, addr)
@@ -76,9 +74,8 @@ func Broadcast(udpPort int, tcpPort int, hostname string) {
 	_, _ = udpConn.Write(buffer)
 }
 
-// ListenBroadcast listens for incoming UDP broadcast packets from other peers
+// ListenBroadcast runs a background UDP listener to discover active peers
 func ListenBroadcast(udpPort int, myHostname string, registry *PeerRegistry) {
-	// Enable SO_REUSEADDR socket option to allow multiple local testing instances
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var err error
@@ -114,7 +111,6 @@ func ListenBroadcast(udpPort int, myHostname string, registry *PeerRegistry) {
 		}
 		ipStr := udpAddr.IP.String()
 
-		// Update peer entry in the RAM registry
 		isNew := registry.AddOrUpdate(peerHostname, ipStr, peerTCPPort)
 		if isNew {
 			fmt.Printf("\n[DISCOVERED] New peer '%s' discovered at %s (TCP Port: %d)\n(Ghost) > ",
