@@ -9,84 +9,76 @@ import (
 	"syscall"
 )
 
-// encodeMessage formats port and hostname into byte slice
-// Format: "PORT|HOSTNAME" (e.g., "8888|Ghost-PC")
-func encodeMessage(port int, hostname string) []byte {
-	text := fmt.Sprintf("%d|%s", port, hostname)
+// encodeMessage formats UDP port, TCP port, and hostname into a standard payload string
+// Format: "UDP_PORT|TCP_PORT|HOSTNAME"
+func encodeMessage(udpPort int, tcpPort int, hostname string) []byte {
+	text := fmt.Sprintf("%d|%d|%s", udpPort, tcpPort, hostname)
 	return []byte(text)
 }
 
-// decodeMessage parses raw byte payload into a port integer and hostname string
-func decodeMessage(data []byte) (int, string, error) {
+// decodeMessage parses raw byte payload into UDP port, TCP port, and hostname string
+func decodeMessage(data []byte) (int, int, string, error) {
 	parts := strings.Split(string(data), "|")
-	if len(parts) < 2 {
-		return 0, "", fmt.Errorf("invalid message format")
+	if len(parts) < 3 {
+		return 0, 0, "", fmt.Errorf("invalid message format")
 	}
-	port, err := strconv.Atoi(parts[0])
-	return port, parts[1], err
+	udpPort, err1 := strconv.Atoi(parts[0])
+	tcpPort, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, "", fmt.Errorf("invalid port format")
+	}
+	return udpPort, tcpPort, parts[2], nil
 }
 
-// getBroadcastAddr calculates the active LAN subnet's broadcast IPv4 address
+// getBroadcastAddr calculates the broadcast IPv4 address of the active LAN interface
 func getBroadcastAddr(port int) *net.UDPAddr {
 	interfaces, err := net.Interfaces()
-	if err != nil { // fallback to limited broadcast (255.255.255.255) if interface lookup fails
+	if err != nil {
 		return &net.UDPAddr{IP: net.IPv4bcast, Port: port}
 	}
 
 	for _, iface := range interfaces {
-		// skip inactive or loopback interfaces
+		// Ignore inactive or loopback network interfaces
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-
 		addrs, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
-
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP.To4() == nil { //ipv4? if no skip
+			if !ok || ipNet.IP.To4() == nil {
 				continue
 			}
-
 			ip := ipNet.IP.To4()
 			mask := ipNet.Mask
 			broadcast := make(net.IP, len(ip))
-			for i := 0; i < len(ip); i++ { //bitwise operation Broadcast IP = IP | (^SubnetMask)
+			for i := 0; i < len(ip); i++ {
 				broadcast[i] = ip[i] | ^mask[i]
 			}
-
 			return &net.UDPAddr{IP: broadcast, Port: port}
 		}
 	}
-
 	return &net.UDPAddr{IP: net.IPv4bcast, Port: port}
 }
 
-// broadcast sends a single UDP broadcast packet announcing presence to the LAN
-func Broadcast(port int, hostname string) {
-	addr := getBroadcastAddr(port)
-	fmt.Printf("sending broadcast message to: %s\n", addr)
-
+// Broadcast transmits a presence packet across the LAN via UDP broadcast
+func Broadcast(udpPort int, tcpPort int, hostname string) {
+	addr := getBroadcastAddr(udpPort)
 	udpConn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
-		fmt.Printf("Error dialing UDP: %v\n", err)
 		return
 	}
 	defer udpConn.Close()
 
-	buffer := encodeMessage(port, hostname)
-	_, err = udpConn.Write(buffer)
-
-	if err != nil {
-		fmt.Printf("Error sending broadcast: %v\n", err)
-	}
+	buffer := encodeMessage(udpPort, tcpPort, hostname)
+	_, _ = udpConn.Write(buffer)
 }
 
-// ListenBroadcast runs a UDP listener in the background to detect active peer broadcasts
-func ListenBroadcast(port int, myHostname string) {
-	//enable SO_REUSEADDR socket to allow multiple local instances for testing
+// ListenBroadcast listens for incoming UDP broadcast packets from other peers
+func ListenBroadcast(udpPort int, myHostname string, registry *PeerRegistry) {
+	// Enable SO_REUSEADDR socket option to allow multiple local testing instances
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var err error
@@ -96,35 +88,37 @@ func ListenBroadcast(port int, myHostname string) {
 			return err
 		},
 	}
-	// bind listener to all interfaces (0.0.0.0) on the designated UDP port
-	packetConn, err := lc.ListenPacket(context.Background(), "udp4", fmt.Sprintf("0.0.0.0:%d", port))
+
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", fmt.Sprintf("0.0.0.0:%d", udpPort))
 	if err != nil {
 		fmt.Printf("Error starting UDP listener: %v\n", err)
 		return
 	}
 	defer packetConn.Close()
 
-	fmt.Printf("Listener is running on UDP port %d...\n", port)
-
 	buf := make([]byte, 1024)
 	for {
-		// read incoming UDP packet into RAM buffer
 		n, remoteAddr, err := packetConn.ReadFrom(buf)
 		if err != nil {
 			continue
 		}
-		// decode payload into peer details
-		peerPort, peerHostname, err := decodeMessage(buf[:n])
-		if err != nil {
+
+		_, peerTCPPort, peerHostname, err := decodeMessage(buf[:n])
+		if err != nil || peerHostname == myHostname {
 			continue
 		}
 
-		//self echo check
-		if peerHostname == myHostname {
+		udpAddr, ok := remoteAddr.(*net.UDPAddr)
+		if !ok {
 			continue
 		}
+		ipStr := udpAddr.IP.String()
 
-		fmt.Printf("\n[DISCOVERED] Found peer '%s' at %s:%d\n",
-			peerHostname, remoteAddr.String(), peerPort)
+		// Update peer entry in the RAM registry
+		isNew := registry.AddOrUpdate(peerHostname, ipStr, peerTCPPort)
+		if isNew {
+			fmt.Printf("\n[DISCOVERED] New peer '%s' discovered at %s (TCP Port: %d)\n(Ghost) > ",
+				peerHostname, ipStr, peerTCPPort)
+		}
 	}
 }
