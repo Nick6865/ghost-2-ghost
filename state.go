@@ -48,6 +48,9 @@ func (m *NodeManager) StartTCPServer(tcpPort int) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if err == net.ErrClosed {
+				return
+			}
 			continue
 		}
 		go m.handleIncomingTCP(conn)
