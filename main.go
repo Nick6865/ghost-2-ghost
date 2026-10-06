@@ -85,12 +85,23 @@ func main() {
 
 		// When in an active chat session, forward messages to the remote peer
 		if nodeMgr.State == StateBUSY {
-			if line == "/quit" {
-				if nodeMgr.ActiveConn != nil {
-					nodeMgr.ActiveConn.Close()
+			if line == "/quit" || line == "/leave" {
+				nodeMgr.LeaveRoom()
+				fmt.Println("Left the chat room.")
+			} else if strings.HasPrefix(line, "/connect ") {
+				//roomate can invite another peer to the room
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					target := parts[1]
+					peer, found := registry.FindPeer(target)
+					if found {
+						go nodeMgr.ConnectToPeer(peer.IP, peer.TCPPort)
+					} else {
+						fmt.Printf("Peer '%s' not found in active list.\n", target)
+					}
 				}
-			} else if nodeMgr.ActiveConn != nil {
-				fmt.Fprintf(nodeMgr.ActiveConn, "%s\n", line)
+			} else {
+				nodeMgr.CurrentRoom.Broadcast(nodeMgr.MyHostname, line)
 				fmt.Print("> ")
 			}
 			continue

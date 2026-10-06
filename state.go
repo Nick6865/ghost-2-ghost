@@ -18,21 +18,78 @@ const (
 	StateBUSY                     // Active 1-on-1 TCP chat session
 )
 
+// multi chat
+type Room struct {
+	mu    sync.RWMutex
+	Peers map[string]net.Conn // Key: Hostname or IP:Port -> Value: TCP Connection
+}
+
 // NodeManager handles state transitions, connection management, and invitation channels
 type NodeManager struct {
 	mu                sync.Mutex
 	State             NodeState
 	MyHostname        string
-	ActiveConn        net.Conn
+	CurrentRoom       *Room
 	PendingInviteChan chan bool
 	PendingHostname   string
+}
+
+func NewRoom() *Room {
+	return &Room{
+		Peers: make(map[string]net.Conn),
+	}
+}
+
+// add a new connection to room
+func (r *Room) AddPeer(hostname string, conn net.Conn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Peers[hostname] = conn
+}
+
+// remove and close a peer's connection
+func (r *Room) RemovePeer(hostname string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if conn, ok := r.Peers[hostname]; ok {
+		conn.Close()
+		delete(r.Peers, hostname)
+	}
+}
+
+// send message to all peers in room
+func (r *Room) Broadcast(senderHostname, message string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	formattedMsg := fmt.Sprintf("%s\n", message)
+	for _, conn := range r.Peers {
+		_, _ = conn.Write([]byte(formattedMsg))
+	}
+}
+
+func (r *Room) CloseAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, conn := range r.Peers {
+		conn.Close()
+	}
+	r.Peers = make(map[string]net.Conn)
+}
+
+// safe read lock
+func (r *Room) IsEmpty() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.Peers) == 0
 }
 
 // NewNodeManager creates a initialized NodeManager instance
 func NewNodeManager(hostname string) *NodeManager {
 	return &NodeManager{
-		State:      StateIDLE,
-		MyHostname: hostname,
+		State:       StateIDLE,
+		MyHostname:  hostname,
+		CurrentRoom: NewRoom(),
 	}
 }
 
@@ -75,8 +132,8 @@ func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 		senderHostname := parts[1]
 
 		m.mu.Lock()
-		// Automatically reject if the current node is busy or already processing an invite
-		if m.State != StateIDLE || m.PendingInviteChan != nil {
+		// Only reject if you are waiting for a response to another invitation
+		if m.State == StateWAITING || m.PendingInviteChan != nil {
 			m.mu.Unlock()
 			fmt.Fprintf(conn, "SYN_REJECT|BUSY\n")
 			conn.Close()
@@ -96,13 +153,14 @@ func (m *NodeManager) handleIncomingTCP(conn net.Conn) {
 			if accepted {
 				m.mu.Lock()
 				m.State = StateBUSY
-				m.ActiveConn = conn
+				m.CurrentRoom.AddPeer(senderHostname, conn)
 				m.PendingInviteChan = nil
 				m.mu.Unlock()
 
 				fmt.Fprintf(conn, "SYN_ACCEPT|%s\n", m.MyHostname)
 				fmt.Printf("\n[SECURE ROOM] Connected with '%s'! (Type '/quit' to leave)\n> ", senderHostname)
-				m.handleChatSession(conn, senderHostname)
+
+				go m.listenToPeer(conn, senderHostname)
 			} else {
 				fmt.Fprintf(conn, "SYN_REJECT|USER_DECLINED\n")
 				conn.Close()
@@ -142,11 +200,12 @@ func (m *NodeManager) clearPending() {
 // ConnectToPeer initiates an outbound TCP connection and performs the handshake
 func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 	m.mu.Lock()
-	if m.State != StateIDLE {
+	if m.State == StateWAITING {
 		fmt.Println("You are currently busy or waiting for a response.")
 		m.mu.Unlock()
 		return
 	}
+	prevState := m.State
 	m.State = StateWAITING
 	m.mu.Unlock()
 
@@ -154,7 +213,7 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", peerIP, tcpPort), 5*time.Second)
 	if err != nil {
 		fmt.Printf("Failed to connect: %v\n", err)
-		m.resetState()
+		m.resetState(prevState)
 		return
 	}
 
@@ -165,7 +224,7 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 	if err != nil {
 		fmt.Println("No response from peer.")
 		conn.Close()
-		m.resetState()
+		m.resetState(prevState)
 		return
 	}
 
@@ -176,11 +235,12 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 		peerHostname := parts[1]
 		m.mu.Lock()
 		m.State = StateBUSY
-		m.ActiveConn = conn
+		m.CurrentRoom.AddPeer(peerHostname, conn)
 		m.mu.Unlock()
 
 		fmt.Printf("\n[SECURE ROOM] Accepted by '%s'! (Type '/quit' to leave)\n> ", peerHostname)
-		m.handleChatSession(conn, peerHostname)
+
+		go m.listenToPeer(conn, peerHostname)
 	} else {
 		reason := "DECLINED"
 		if len(parts) > 1 {
@@ -188,34 +248,43 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 		}
 		fmt.Printf("\n[REJECTED] Peer declined request (%s).\n", reason)
 		conn.Close()
-		m.resetState()
+		m.resetState(prevState)
 	}
 }
 
 // resetState restores node state to StateIDLE
-func (m *NodeManager) resetState() {
+func (m *NodeManager) resetState(oldState NodeState) {
 	m.mu.Lock()
 	m.State = StateIDLE
-	m.ActiveConn = nil
 	m.PendingInviteChan = nil
 	m.mu.Unlock()
 }
 
-// handleChatSession blocks until the peer closes the TCP socket
-func (m *NodeManager) handleChatSession(conn net.Conn, peerHostname string) {
-	done := make(chan struct{})
+// goroutine to read messages from each TCP connection.
+func (m *NodeManager) listenToPeer(conn net.Conn, peerHostname string) {
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		msg := scanner.Text()
+		fmt.Printf("\r[%s]: %s\n> ", peerHostname, msg)
+	}
 
-	go func() {
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			msg := scanner.Text()
-			fmt.Printf("\r[%s]: %s\n> ", peerHostname, msg)
-		}
-		fmt.Printf("\n[DISCONNECTED] '%s' left the room.\n", peerHostname)
-		close(done)
-	}()
+	fmt.Printf("\n[DISCONNECTED] '%s' left the room.\n> ", peerHostname)
+	m.CurrentRoom.RemovePeer(peerHostname)
 
-	<-done
-	conn.Close()
-	m.resetState()
+	if m.CurrentRoom.IsEmpty() {
+		m.mu.Lock()
+		m.State = StateIDLE
+		m.mu.Unlock()
+		fmt.Println("[ROOM CLOSED] All peers left. Returned to IDLE state.")
+	}
+}
+
+// close all connection and reset to IDLE
+func (m *NodeManager) LeaveRoom() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CurrentRoom.CloseAll()
+	m.State = StateIDLE
+
+	m.CurrentRoom.CloseAll()
 }
