@@ -80,7 +80,7 @@ func ListenBroadcast(udpPort int, myHostname string, registry *PeerRegistry) {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var err error
 			c.Control(func(fd uintptr) {
-				err = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				err = setReuseControl(fd)
 			})
 			return err
 		},
