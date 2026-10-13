@@ -88,6 +88,10 @@ func main() {
 			if line == "/quit" || line == "/leave" {
 				nodeMgr.LeaveRoom()
 				fmt.Println("Left the chat room.")
+			} else if nodeMgr.HasPendingInvite() && (line == "/accept" || line == "y" || line == "Y") {
+				nodeMgr.AcceptPendingInvite(true)
+			} else if nodeMgr.HasPendingInvite() && (line == "/decline" || line == "n" || line == "N") {
+				nodeMgr.AcceptPendingInvite(false)
 			} else if strings.HasPrefix(line, "/connect ") {
 				//roomate can invite another peer to the room
 				parts := strings.Fields(line)

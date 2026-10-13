@@ -57,6 +57,13 @@ func (r *Room) RemovePeer(hostname string) {
 	}
 }
 
+// check if there is an incoming invite
+func (m *NodeManager) HasPendingInvite() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.PendingInviteChan != nil
+}
+
 // send message to all peers in room
 func (r *Room) Broadcast(senderHostname, message string) {
 	r.mu.RLock()
@@ -255,7 +262,7 @@ func (m *NodeManager) ConnectToPeer(peerIP string, tcpPort int) {
 // resetState restores node state to StateIDLE
 func (m *NodeManager) resetState(oldState NodeState) {
 	m.mu.Lock()
-	m.State = StateIDLE
+	m.State = oldState
 	m.PendingInviteChan = nil
 	m.mu.Unlock()
 }
