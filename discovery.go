@@ -29,22 +29,23 @@ func decodeMessage(data []byte) (int, int, string, error) {
 	return udpPort, tcpPort, parts[2], nil
 }
 
-// getBroadcastAddr determines the subnet broadcast IPv4 address
-func getBroadcastAddr(port int) *net.UDPAddr {
+// getBroadcastAddresses gets the list of Broadcast addresses of all network cards
+func getBroadcastAddr(port int) []*net.UDPAddr {
+	var addrs []*net.UDPAddr
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return &net.UDPAddr{IP: net.IPv4bcast, Port: port}
+		return []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
 	}
 
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := iface.Addrs()
+		addrsList, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
-		for _, addr := range addrs {
+		for _, addr := range addrsList {
 			ipNet, ok := addr.(*net.IPNet)
 			if !ok || ipNet.IP.To4() == nil {
 				continue
@@ -55,23 +56,26 @@ func getBroadcastAddr(port int) *net.UDPAddr {
 			for i := 0; i < len(ip); i++ {
 				broadcast[i] = ip[i] | ^mask[i]
 			}
-			return &net.UDPAddr{IP: broadcast, Port: port}
+			addrs = append(addrs, &net.UDPAddr{IP: broadcast, Port: port})
 		}
 	}
-	return &net.UDPAddr{IP: net.IPv4bcast, Port: port}
+	addrs = append(addrs, &net.UDPAddr{IP: net.IPv4bcast, Port: port})
+	return addrs
 }
 
 // Broadcast sends a single UDP broadcast packet announcing presence on the LAN
 func Broadcast(udpPort int, tcpPort int, hostname string) {
-	addr := getBroadcastAddr(udpPort)
-	udpConn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		return
-	}
-	defer udpConn.Close()
-
 	buffer := encodeMessage(udpPort, tcpPort, hostname)
-	_, _ = udpConn.Write(buffer)
+	addrs := getBroadcastAddr(udpPort)
+
+	for _, addr := range addrs {
+		udpConn, err := net.DialUDP("udp4", nil, addr)
+		if err != nil {
+			continue
+		}
+		_, _ = udpConn.Write(buffer)
+		udpConn.Close()
+	}
 }
 
 // ListenBroadcast runs a background UDP listener to discover active peers
