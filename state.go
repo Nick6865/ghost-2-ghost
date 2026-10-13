@@ -69,9 +69,22 @@ func (r *Room) Broadcast(senderHostname, message string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	formattedMsg := fmt.Sprintf("%s\n", message)
+	formattedMsg := fmt.Sprintf("%s|%s\n", senderHostname, message)
 	for _, conn := range r.Peers {
 		_, _ = conn.Write([]byte(formattedMsg))
+	}
+}
+
+// RelayExcept forwards the raw packet to all peers OTHER than the peer that just sent it
+func (r *Room) RelayExcept(exceptSender string, rawPayload string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	formattedMsg := fmt.Sprintf("%s\n", rawPayload)
+	for hostname, conn := range r.Peers {
+		if hostname != exceptSender {
+			_, _ = conn.Write([]byte(formattedMsg))
+		}
 	}
 }
 
@@ -271,8 +284,19 @@ func (m *NodeManager) resetState(oldState NodeState) {
 func (m *NodeManager) listenToPeer(conn net.Conn, peerHostname string) {
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
-		msg := scanner.Text()
-		fmt.Printf("\r[%s]: %s\n> ", peerHostname, msg)
+		rawMsg := scanner.Text()
+
+		parts := strings.SplitN(rawMsg, "|", 2)
+		sender := peerHostname
+		msgContent := rawMsg
+
+		if len(parts) == 2 {
+			sender = parts[0]
+			msgContent = parts[1]
+		}
+
+		fmt.Printf("\r[%s]: %s\n> ", sender, msgContent)
+		m.CurrentRoom.RelayExcept(peerHostname, rawMsg)
 	}
 
 	fmt.Printf("\n[DISCONNECTED] '%s' left the room.\n> ", peerHostname)
