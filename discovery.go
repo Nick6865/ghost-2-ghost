@@ -80,6 +80,7 @@ func ListenBroadcast(udpPort int, myHostname string, registry *PeerRegistry) {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var err error
 			c.Control(func(fd uintptr) {
+				//go get golang.org/x/sys/unix
 				err = setReuseControl(fd)
 			})
 			return err
